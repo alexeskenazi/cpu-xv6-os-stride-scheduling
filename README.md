@@ -5,6 +5,57 @@ This project extends the xv6 operating system with two key features:
 1. Race condition control after fork()
 2. Stride scheduling implementation
 
+## Installation
+
+### Prerequisites
+- Linux environment (or a VM running Linux)
+- QEMU emulator
+- GCC compiler
+
+### Building and Running
+1. Clone the repository:
+   ```
+   git clone <repository-url>
+   ```
+
+2. Run xv6 in QEMU:
+   ```
+   make qemu-nox
+   ```
+
+   After compilation, you should see:
+   ```
+   xv6...
+   cpu0: starting 0
+   sb: size 1000 nblocks 941 ninodes 200 nlog 30 logstart 2 inodestart 32 bmap start 58
+   init: starting sh
+   $
+   ```
+
+### Troubleshooting
+
+1. If you encounter the error:
+   ```
+   make: execvp: ./sign.pl: Permission denied
+   ```
+   
+   Run these commands:
+   ```
+   chmod ugo+x ./sign.pl
+   make clean
+   make qemu-nox
+   ```
+
+2. When using a linux distribution:
+   - Install QEMU (Ubuntu example):
+     ```
+     sudo apt-get install qemu
+     ```
+   - Open the Makefile and comment out the line:
+     ```
+     # QEMU = ~boubinjg/fs/bin/qemu-system-i386
+     ```
+
 ## 1. Race Condition After fork()
 
 ### Implementation
