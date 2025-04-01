@@ -59,6 +59,8 @@ Stride scheduling is a proportional-share CPU scheduling algorithm that allocate
 - Provides fair CPU allocation based on process priority
 - Prevents starvation through implicit aging mechanism
 
+![Stride Schduling Details](cpu-stride-scheduling-explanation.png)
+
 ## Sample Output
 Below is the output of running the test cases that verify both the Round Robin and Stride scheduling implementations:
 
