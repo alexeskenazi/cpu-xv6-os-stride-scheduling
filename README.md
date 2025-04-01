@@ -1,4 +1,4 @@
-# CS350 Operating Systems - Project 2
+# xv6 Extended: Fork Race Control & Stride Scheduling
 
 ## Overview
 This project extends the xv6 operating system with two key features:
