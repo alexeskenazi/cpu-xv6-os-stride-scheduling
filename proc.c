@@ -17,10 +17,16 @@ static struct proc *initproc;
 int nextpid = 1;
 int sched_trace_enabled = 0; // ZYF: for OS CPU/process project
 int sched_trace_counter = 0; // ZYF: counter for print formatting
+
+int child_first_scheduling = 0;
+int stride_scheduling = 0;
+
 extern void forkret(void);
 extern void trapret(void);
 
 static void wakeup1(void *chan);
+
+void redistribute_tickets(void);
 
 void
 pinit(void)
@@ -218,6 +224,13 @@ fork(void)
   np->state = RUNNABLE;
   release(&ptable.lock);
 
+  if (stride_scheduling)
+    redistribute_tickets();
+
+  if (child_first_scheduling) {
+    yield();
+  }
+
   return pid;
 }
 
@@ -263,6 +276,12 @@ exit(void)
 
   // Jump into the scheduler, never to return.
   curproc->state = ZOMBIE;
+  release(&ptable.lock);
+
+  if (stride_scheduling)
+    redistribute_tickets();
+
+  acquire(&ptable.lock);
   sched();
   panic("zombie exit");
 }
@@ -311,6 +330,141 @@ wait(void)
   }
 }
 
+// used by sys_set_sched to ensure ticket values are reset
+void reset_procs() {
+
+  acquire(&ptable.lock);
+  
+  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    p->tickets = 0;
+    p->stride = 0;
+    p->pass = 0;
+  }
+
+  release(&ptable.lock);
+}
+  
+
+// Returns the number of tickets owned by the process with the given PID.
+int tickets_owned_helper(int pid) {
+
+  int my_tickets = -1;
+
+  acquire(&ptable.lock);
+  
+  // find the process with provided PID
+  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid) {
+      my_tickets = p->tickets;
+      break;
+    }
+  }
+
+  release(&ptable.lock);
+
+  return my_tickets;
+}
+    
+  
+
+int transfer_tickets_helper(int pid, int tickets) {
+  
+  struct proc *recipient = 0, *sender = myproc();
+  int sender_tickets;
+  
+  acquire(&ptable.lock);
+    
+  // find the process with provided PID
+  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid) {
+      recipient = p;
+      break;
+    }
+  }
+
+  if (!recipient) {
+    release(&ptable.lock);
+    return -3;
+  }
+
+  // If the number of tickets requested to transfer is smaller than 0, return -1
+  if (tickets < 0) {
+    release(&ptable.lock);
+    return -1;
+  }
+
+  // If the number of tickets requested to transfer is larger than ticket p−1, return -2.
+  sender_tickets = sender->tickets;
+  
+  if (tickets > (sender_tickets - 1)) {
+    release(&ptable.lock);
+    return -2;
+  }
+
+  // Verify recipient is in valid state
+  if (recipient->state != RUNNABLE && recipient->state != RUNNING) {
+    release(&ptable.lock);
+    return -5;
+  }
+
+  // transfer tickets and update stride
+  sender->tickets -= tickets;
+  if(sender->tickets > 0) {
+    sender->stride = STRIDE_TOTAL_TICKETS * 10 / sender->tickets;
+  }
+  
+  recipient->tickets += tickets;
+  recipient->stride = STRIDE_TOTAL_TICKETS * 10 / recipient->tickets;
+
+  // store return value to be able to release ptable lock
+  sender_tickets = sender->tickets;
+  // cprintf("final results are %d %d %d %d %d %d\n", sender->tickets,
+  //	  sender->stride, sender->pass, recipient->tickets, recipient->stride,
+  //	  recipient->pass);
+
+  release(&ptable.lock);
+  
+  return sender_tickets;
+}
+
+			     
+
+
+void redistribute_tickets(void) {
+  int num_procs = 0, tickets, stride;
+  
+  acquire(&ptable.lock);
+  
+  // count number of procs that will be distributed to (only runnable or running)
+  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == RUNNABLE || p->state == RUNNING)
+      num_procs++;
+  }
+
+  if (num_procs == 0) {
+    release(&ptable.lock);
+    return;
+  }
+
+  tickets = STRIDE_TOTAL_TICKETS / num_procs;
+  stride = STRIDE_TOTAL_TICKETS * 10 / tickets;
+
+  // set stride values and reset pass values (only runnable or running)
+  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == RUNNABLE || p->state == RUNNING) {
+      p->tickets = tickets;
+      p->stride = stride;
+      p->pass = 0;
+    }
+  }
+  
+  release(&ptable.lock);
+}
+
+
+
+
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -328,37 +482,92 @@ scheduler(void)
   
   int ran = 0; // CS 350/550: to solve the 100%-CPU-utilization-when-idling problem
 
+  struct proc* lowest_pass_proc; 
+
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
-        // Loop over process table looking for process to run.
-        acquire(&ptable.lock);
-        ran = 0;
-        for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-          if(p->state != RUNNABLE)
-            continue;
+    acquire(&ptable.lock);
+    ran = 0;
 
-          ran = 1;
+    if (stride_scheduling) {
+      lowest_pass_proc = 0;
       
-          // Switch to chosen process.  It is the process's job
-          // to release ptable.lock and then reacquire it
-          // before jumping back to us.
-          c->proc = p;
-          switchuvm(p);
-          p->state = RUNNING;
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        // skip if p is not runnable
+        if(p->state != RUNNABLE)
+          continue;
 
-          swtch(&(c->scheduler), p->context);
-          switchkvm();
+	//cprintf("pid %d: pass = %d\n", p->pid, p->pass);
+    
+        // set the first to have lowest pass or update if better candidate found
+        if (!lowest_pass_proc || p->pass < lowest_pass_proc->pass ||
+           (p->pass == lowest_pass_proc->pass && p->pid < lowest_pass_proc->pid)) {
+          lowest_pass_proc = p;
+        }
+      }
+    
+      // Only proceed if we found a valid process
+      if (lowest_pass_proc != 0) {
 
-          // Process is done running for now.
-          // It should have changed its p->state before coming back.
-          c->proc = 0;
-    }
-    release(&ptable.lock);
+	//	cprintf("chosen proc has pid tickets, stride, pass as  %d %d %d %d\n",
+	//	lowest_pass_proc->pid,
+	//	lowest_pass_proc->tickets,
+	//	lowest_pass_proc->stride,
+	//	lowest_pass_proc->pass);
 
-    if (ran == 0){
+	lowest_pass_proc->pass += lowest_pass_proc->stride;
+	//cprintf("updated lowest_pass_proc->pass to be %d\n", lowest_pass_proc->pass);
+	//	cprintf("CHOSE TO RUN  %d\n", lowest_pass_proc->pid);
+	
+        c->proc = lowest_pass_proc;
+        switchuvm(lowest_pass_proc);
+        lowest_pass_proc->state = RUNNING;
+        
+        swtch(&(c->scheduler), lowest_pass_proc->context);
+        switchkvm();
+    
+        c->proc = 0;
+	
+      }
+      
+      release(&ptable.lock);
+      
+      // If no process was found, call halt()
+      if (!lowest_pass_proc) {
         halt();
+      }
+    }
+
+    // use default RR scheduling
+    else {
+      // Loop over process table looking for process to run.
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+	if(p->state != RUNNABLE)
+	  continue;
+
+	ran = 1;
+      
+	// Switch to chosen process.  It is the process's job
+	// to release ptable.lock and then reacquire it
+	// before jumping back to us.
+	c->proc = p;
+	switchuvm(p);
+	p->state = RUNNING;
+
+	swtch(&(c->scheduler), p->context);
+	switchkvm();
+
+	// Process is done running for now.
+	// It should have changed its p->state before coming back.
+	c->proc = 0;
+      }
+      release(&ptable.lock);
+
+      if (ran == 0){
+        halt();
+      }
     }
   }
 }

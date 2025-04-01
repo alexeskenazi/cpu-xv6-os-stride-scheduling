@@ -120,6 +120,10 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int             tickets_owned_helper(int);
+int             transfer_tickets_helper(int, int);
+void            reset_procs(void);
+void            redistribute_tickets(void);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
